@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "socket.io-client": "^2.5.0",
+    "telegraf": "^4.16.3"
+  }
+}
