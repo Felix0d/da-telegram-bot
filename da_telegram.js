@@ -4,14 +4,15 @@ const dpToken = process.env.DP_TOKEN;
 const dxToken = process.env.DX_TOKEN;
 const channel = process.env.TELEGRAM_CHANNEL;
 
-// --- Мини-сервер для UptimeRobot (чтобы Render не засыпал) ---
 const http = require('http');
+const { Telegraf } = require('telegraf');
+
+// --- Мини-сервер для мониторинга (чтобы Render не засыпал) ---
 http.createServer((req, res) => {
   res.write("I am alive!");
   res.end();
 }).listen(process.env.PORT || 3000); 
 
-const { Telegraf } = require('telegraf');
 const bot = new Telegraf(telegramToken);
 
 // Запуск бота с очисткой зависших обновлений (лечит ошибку 409 Conflict)
@@ -48,14 +49,14 @@ let lastDpId = null;
 async function checkDonatePay() {
   if (!dpToken) return;
   try {
-    const response = await fetch(`https://donatepay.ru/api/v1/transactions?access_token=${dpToken}&limit=5`);
+    // Используем эндпоинт и домен .eu из твоей документации
+    const response = await fetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken}&limit=5`);
     const data = await response.json();
     
     if (data.status === 'success') {
-      // Если это первый запуск и история пуста (или есть донаты)
       if (lastDpId === null) { 
-        bot.telegram.sendMessage(channel, "🔵 Связь с DonatePay установлена! Бот следит за эфиром.");
-        lastDpId = data.data.length > 0 ? data.data[0].id : 0; 
+        bot.telegram.sendMessage(channel, "🔵 Связь с DonatePay установлена! Бот видит API.");
+        lastDpId = (data.data && data.data.length > 0) ? data.data[0].id : 0; 
         return; 
       }
       
@@ -64,8 +65,9 @@ async function checkDonatePay() {
         bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
         lastDpId = d.id;
       }
-    } else {
+    } else if (lastDpId === null) {
       console.log("❌ Ошибка DonatePay API:", data.error || "Неизвестно");
+      lastDpId = -1; // Чтобы не спамить в логи
     }
   } catch (e) { console.log("❌ Ошибка сети DonatePay:", e.message); }
 }
@@ -83,7 +85,7 @@ async function checkDonateX() {
     if (data && Array.isArray(data.donations)) {
       if (lastDxId === null) { 
         bot.telegram.sendMessage(channel, "🟢 Связь с DonateX установлена!");
-        lastDxId = data.donations.length > 0 ? data.donations[0].id : 0; 
+        lastDxId = (data.donations.length > 0) ? data.donations[0].id : 0; 
         return; 
       }
       
@@ -96,7 +98,7 @@ async function checkDonateX() {
   } catch (e) { console.log("❌ Ошибка сети DonateX:", e.message); }
 }
 
-// Проверка каждые 20 секунд
+// Проверка раз в 20 секунд
 setInterval(() => {
   checkDonatePay();
   checkDonateX();
