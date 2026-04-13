@@ -1,6 +1,7 @@
 const telegramToken = process.env.TELEGRAM_TOKEN;
 const daToken = process.env.DA_TOKEN;
-const dpToken = process.env.DP_TOKEN; // Добавили место для токена DonatePay
+const dpToken = process.env.DP_TOKEN;
+const dxToken = process.env.DX_TOKEN; // Наш новый токен DonateX
 const channel = process.env.TELEGRAM_CHANNEL;
 
 // --- Мини-сервер для UptimeRobot ---
@@ -12,18 +13,15 @@ http.createServer((req, res) => {
 
 const { Telegraf } = require('telegraf');
 const bot = new Telegraf(telegramToken);
-
-bot.launch({dropPendingUpdates: true}, console.log("Bot is online!"));
+bot.launch({dropPendingUpdates: true}, console.log("All systems GO!"));
 
 // ==========================================
-// 1. DONATION ALERTS (Оранжевый)
+// 1. DONATION ALERTS (🟠)
 // ==========================================
 let daEventId = null;
 const socket = require('socket.io-client')
-  .connect("wss://socket.donationalerts.ru:443", 
-  { transports: ["websocket"], reconnection: true });
+  .connect("wss://socket.donationalerts.ru:443", { transports: ["websocket"], reconnection: true });
 
-// Если токен DA есть, подключаемся
 if (daToken) {
     socket.emit('add-user', { token: daToken, type: "minor" });
 }
@@ -32,56 +30,57 @@ socket.on('donation', function(msg){
   let event = JSON.parse(msg);
   if (event.alert_type === '1' || event.alert_type === 1) {
     if (daEventId === event.id) return;
-    if (event.username === null) event.username = 'Аноним';
     daEventId = event.id;
-    
-    bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${event.username} донатит ${event.amount_formatted} ${event.currency}\n"${event.message}"`);
+    const user = event.username || 'Аноним';
+    bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${user}: ${event.amount_formatted} ${event.currency}\n"${event.message}"`);
   }
 });
 
 // ==========================================
-// 2. DONATE PAY (Синий)
+// 2. DONATE PAY (🔵)
 // ==========================================
 let lastDpId = null;
-
 async function checkDonatePay() {
-  if (!dpToken) return; // Если токена нет, не проверяем
-
+  if (!dpToken) return;
   try {
-    // Стучимся к DonatePay
-    const response = await fetch(`https://donatepay.ru/api/v1/transactions?access_token=${dpToken}&limit=10`);
+    const response = await fetch(`https://donatepay.ru/api/v1/transactions?access_token=${dpToken}&limit=5`);
     const data = await response.json();
-
     if (data.status === 'success' && data.data.length > 0) {
-      
-      // Если это первый запуск, просто запоминаем ID последнего доната
-      if (lastDpId === null) {
-        lastDpId = data.data[0].id;
-        return; 
-      }
-
-      // Ищем новые донаты (которые появились после lastDpId)
-      const newDonations = [];
-      for (let doc of data.data) {
-        if (doc.id === lastDpId) break; 
-        newDonations.push(doc);
-      }
-
-      // Отправляем в Телеграм (от старых к новым)
-      for (let i = newDonations.length - 1; i >= 0; i--) {
-        const event = newDonations[i];
-        const username = event.what || 'Аноним';
-        const amount = event.sum;
-        const message = event.comment || '';
-
-        bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${username} донатит ${amount}\n"${message}"`);
-        lastDpId = event.id; // Обновляем ID
+      if (lastDpId === null) { lastDpId = data.data[0].id; return; }
+      const newDons = data.data.filter(d => d.id > lastDpId).reverse();
+      for (let d of newDons) {
+        bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
+        lastDpId = d.id;
       }
     }
-  } catch (error) {
-    console.log("DonatePay fetch error:", error.message);
-  }
+  } catch (e) { console.log("DP error"); }
 }
 
-// Запускаем проверку DonatePay каждые 10 секунд
-setInterval(checkDonatePay, 10000);
+// ==========================================
+// 3. DONATE X (🟢)
+// ==========================================
+let lastDxId = null;
+async function checkDonateX() {
+  if (!dxToken) return;
+  try {
+    // В DonateX обычно используется этот эндпоинт для последних донатов
+    const response = await fetch(`https://donatex.gg/api/v1/donations?token=${dxToken}&limit=5`);
+    const data = await response.json();
+    
+    // Проверяем структуру (может отличаться, уточни в документации на скрине)
+    if (data && data.donations) {
+      if (lastDxId === null) { lastDxId = data.donations[0].id; return; }
+      const newDons = data.donations.filter(d => d.id > lastDxId).reverse();
+      for (let d of newDons) {
+        bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || 'Аноним'}: ${d.amount} ${d.currency}\n"${d.comment || ''}"`);
+        lastDxId = d.id;
+      }
+    }
+  } catch (e) { console.log("DX error"); }
+}
+
+// Проверяем сайты каждые 15 секунд
+setInterval(() => {
+  checkDonatePay();
+  checkDonateX();
+}, 15000);
