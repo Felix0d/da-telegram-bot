@@ -7,28 +7,31 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
+// Веб-сервер для UptimeRobot
 http.createServer((req, res) => {
-  res.write("Bot is running!");
+  res.write("Vampire Bot is awake!");
   res.end();
 }).listen(process.env.PORT || 3000); 
 
 const bot = new Telegraf(telegramToken);
 
+// Запуск бота с очисткой очереди
 bot.launch({ dropPendingUpdates: true })
-  .then(() => console.log("🚀 Бот запущен! Ожидаем..."))
+  .then(() => console.log("🚀 Системы запущены!"))
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
+// Безопасный запрос данных
 async function safeFetch(url) {
     try {
         const response = await fetch(url);
         if (!response.ok) return { error: `HTTP ${response.status}` };
         const text = await response.text();
-        if (text.trim().startsWith('<')) return { error: "HTML_RESPONSE" };
+        if (text.trim().startsWith('<')) return { error: "HTML_PAGE" };
         return JSON.parse(text);
     } catch (e) { return { error: e.message }; }
 }
 
-// 1. DONATION ALERTS
+// 1. DONATION ALERTS (🟠)
 let daEventId = null;
 const socket = require('socket.io-client')
   .connect("wss://socket.donationalerts.ru:443", { transports: ["websocket"], reconnection: true });
@@ -36,7 +39,7 @@ const socket = require('socket.io-client')
 if (daToken) {
     socket.emit('add-user', { token: daToken, type: "minor" });
     console.log("🟠 DonationAlerts: OK");
-}
+} else { console.log("🟠 DonationAlerts: ПРОПУЩЕН (Нет токена)"); }
 
 socket.on('donation', function(msg){
   let event = JSON.parse(msg);
@@ -48,10 +51,10 @@ socket.on('donation', function(msg){
   }
 });
 
-// 2. DONATE PAY
+// 2. DONATE PAY (🔵)
 let lastDpId = null;
 async function checkDonatePay() {
-  if (!dpToken) return;
+  if (!dpToken) { if (lastDpId === null) console.log("🔵 DonatePay: ПРОПУЩЕН (Нет токена)"); return; }
   const data = await safeFetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken}&limit=5`);
   if (data && data.status === 'success') {
     if (lastDpId === null) {
@@ -66,20 +69,19 @@ async function checkDonatePay() {
   }
 }
 
-// 3. DONATE X (С усиленными логами)
+// 3. DONATE X (🟢)
 let lastDxId = null;
 async function checkDonateX() {
-  if (!dxToken) {
-      console.log("🟢 DonateX: Пропущен (Нет токена DX_TOKEN в Environment)");
-      return;
+  if (!dxToken) { 
+      if (lastDxId === null) console.log("🟢 DonateX: ПРОПУЩЕН (Проверь переменную DX_TOKEN в Render)"); 
+      lastDxId = -1; 
+      return; 
   }
-  
   const data = await safeFetch(`https://donatex.gg/api/v1/donations?token=${dxToken}&limit=5`);
-  
   if (data && Array.isArray(data.donations)) {
-    if (lastDxId === null) {
+    if (lastDxId === null || lastDxId === -1) {
       lastDxId = data.donations.length > 0 ? data.donations[0].id : 0;
-      console.log("🟢 DonateX: OK (Связь установлена)");
+      console.log("🟢 DonateX: OK");
       return;
     }
     data.donations.filter(d => d.id > lastDxId).reverse().forEach(d => {
@@ -91,5 +93,6 @@ async function checkDonateX() {
   }
 }
 
+// Цикл проверки
 setInterval(checkDonatePay, 20000);
 setInterval(checkDonateX, 22000);
