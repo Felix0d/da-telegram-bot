@@ -69,7 +69,7 @@ async function checkDonateX() {
     
     // Проверяем структуру (может отличаться, уточни в документации на скрине)
     if (data && data.donations) {
-      if (lastDxId === null) { lastDxId = data.donations[0].id; return; }
+      if (lastDxId === null) { lastDxId = 0; return; }
       const newDons = data.donations.filter(d => d.id > lastDxId).reverse();
       for (let d of newDons) {
         bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || 'Аноним'}: ${d.amount} ${d.currency}\n"${d.comment || ''}"`);
