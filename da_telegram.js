@@ -46,7 +46,7 @@ async function checkDonatePay() {
     const response = await fetch(`https://donatepay.ru/api/v1/transactions?access_token=${dpToken}&limit=5`);
     const data = await response.json();
     if (data.status === 'success' && data.data.length > 0) {
-      if (lastDpId === null) { lastDpId = data.data[0].id; return; }
+      if (lastDpId === null) { lastDpId = 0; return; }
       const newDons = data.data.filter(d => d.id > lastDpId).reverse();
       for (let d of newDons) {
         bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
