@@ -7,18 +7,28 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// --- Мини-сервер для мониторинга (чтобы Render не засыпал) ---
+// Сервер для UptimeRobot
 http.createServer((req, res) => {
-  res.write("I am alive!");
+  res.write("Bot is running!");
   res.end();
 }).listen(process.env.PORT || 3000); 
 
 const bot = new Telegraf(telegramToken);
 
-// Запуск бота с очисткой зависших обновлений (лечит ошибку 409 Conflict)
+// Запуск с очисткой старых обновлений (лечит 409 Conflict)
 bot.launch({ dropPendingUpdates: true })
-  .then(() => console.log("✅ Бот запущен! Ожидаю донаты..."))
-  .catch((err) => console.error("❌ Ошибка запуска Telegram:", err.message));
+  .then(() => console.log("🚀 Бот полностью готов! Ждем донаты..."))
+  .catch((err) => console.error("❌ Ошибка запуска:", err.message));
+
+// --- Вспомогательная функция для безопасного получения JSON ---
+async function safeFetch(url) {
+    try {
+        const response = await fetch(url);
+        const text = await response.text();
+        if (text.trim().startsWith('<')) return null; // Защита от HTML ошибок
+        return JSON.parse(text);
+    } catch (e) { return null; }
+}
 
 // ==========================================
 // 1. DONATION ALERTS (🟠)
@@ -29,16 +39,16 @@ const socket = require('socket.io-client')
 
 if (daToken) {
     socket.emit('add-user', { token: daToken, type: "minor" });
-    console.log("🟠 Подключено к DonationAlerts");
+    console.log("🟠 DonationAlerts: OK");
 }
 
 socket.on('donation', function(msg){
   let event = JSON.parse(msg);
   if (event.alert_type === '1' || event.alert_type === 1) {
+    if (daEventId === null) { daEventId = event.id; return; } // Молчим при старте
     if (daEventId === event.id) return;
     daEventId = event.id;
-    const user = event.username || 'Аноним';
-    bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${user}: ${event.amount_formatted} ${event.currency}\n"${event.message}"`);
+    bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${event.username || 'Аноним'}: ${event.amount_formatted} ${event.currency}\n"${event.message || ''}"`);
   }
 });
 
@@ -48,28 +58,20 @@ socket.on('donation', function(msg){
 let lastDpId = null;
 async function checkDonatePay() {
   if (!dpToken) return;
-  try {
-    // Используем эндпоинт и домен .eu из твоей документации
-    const response = await fetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken}&limit=5`);
-    const data = await response.json();
-    
-    if (data.status === 'success') {
-      if (lastDpId === null) { 
-        bot.telegram.sendMessage(channel, "🔵 Связь с DonatePay установлена! Бот видит API.");
-        lastDpId = (data.data && data.data.length > 0) ? data.data[0].id : 0; 
-        return; 
-      }
-      
-      const newDons = data.data.filter(d => d.id > lastDpId).reverse();
-      for (let d of newDons) {
-        bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
-        lastDpId = d.id;
-      }
-    } else if (lastDpId === null) {
-      console.log("❌ Ошибка DonatePay API:", data.error || "Неизвестно");
-      lastDpId = -1; // Чтобы не спамить в логи
+  const data = await safeFetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken}&limit=5`);
+  
+  if (data && data.status === 'success' && data.data) {
+    if (lastDpId === null) {
+      lastDpId = data.data.length > 0 ? data.data[0].id : 0;
+      console.log("🔵 DonatePay: OK");
+      return;
     }
-  } catch (e) { console.log("❌ Ошибка сети DonatePay:", e.message); }
+    const newDons = data.data.filter(d => d.id > lastDpId).reverse();
+    for (let d of newDons) {
+      bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
+      lastDpId = d.id;
+    }
+  }
 }
 
 // ==========================================
@@ -78,24 +80,20 @@ async function checkDonatePay() {
 let lastDxId = null;
 async function checkDonateX() {
   if (!dxToken) return;
-  try {
-    const response = await fetch(`https://donatex.gg/api/v1/donations?token=${dxToken}&limit=5`);
-    const data = await response.json();
-    
-    if (data && Array.isArray(data.donations)) {
-      if (lastDxId === null) { 
-        bot.telegram.sendMessage(channel, "🟢 Связь с DonateX установлена!");
-        lastDxId = (data.donations.length > 0) ? data.donations[0].id : 0; 
-        return; 
-      }
-      
-      const newDons = data.donations.filter(d => d.id > lastDxId).reverse();
-      for (let d of newDons) {
-        bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || 'Аноним'}: ${d.amount} ${d.currency}\n"${d.comment || ''}"`);
-        lastDxId = d.id;
-      }
+  const data = await safeFetch(`https://donatex.gg/api/v1/donations?token=${dxToken}&limit=5`);
+  
+  if (data && Array.isArray(data.donations)) {
+    if (lastDxId === null) {
+      lastDxId = data.donations.length > 0 ? data.donations[0].id : 0;
+      console.log("🟢 DonateX: OK");
+      return;
     }
-  } catch (e) { console.log("❌ Ошибка сети DonateX:", e.message); }
+    const newDons = data.donations.filter(d => d.id > lastDxId).reverse();
+    for (let d of newDons) {
+      bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || 'Аноним'}: ${d.amount} ${d.currency}\n"${d.comment || ''}"`);
+      lastDxId = d.id;
+    }
+  }
 }
 
 // Проверка раз в 20 секунд
