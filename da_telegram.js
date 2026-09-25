@@ -7,7 +7,6 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// Веб-сервер для поддержания активности на Render
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -15,10 +14,8 @@ http.createServer((req, res) => {
 
 const bot = new Telegraf(telegramToken);
 
-// Команда /start для проверки связи
 bot.start((ctx) => {
-  console.log(`Получена команда /start от @${ctx.from.username || 'user'} (ID: ${ctx.chat.id})`);
-  ctx.reply(`🦇 Я на связи! Все системы работают.\n\nТвой Chat ID: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
+  ctx.reply(`🦇 Бот на связи!\nТвой Chat ID: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.launch({ dropPendingUpdates: true })
@@ -26,20 +23,27 @@ bot.launch({ dropPendingUpdates: true })
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠)
+// 1. DONATION ALERTS (🟠) - ОБНОВЛЕННЫЙ СОКЕТ
 // ==========================================
 let lastDaId = null;
 
 if (daToken) {
-  const socket = require('socket.io-client')("wss://socket.donationalerts.ru:443", { 
-    transports: ["websocket"], 
+  const io = require('socket.io-client');
+  
+  // Добавляем браузерную маскировку и поддержку polling для обхода фильтров Cloudflare
+  const socket = io("https://socket.donationalerts.ru:443", { 
+    transports: ["polling", "websocket"],
     reconnection: true,
-    reconnectionDelay: 5000
+    reconnectionDelay: 5000,
+    forceNew: true,
+    extraHeaders: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Origin": "https://www.donationalerts.com"
+    }
   });
 
-  // Авторизуемся ТОЛЬКО после реального рукопожатия с сервером
   socket.on('connect', () => {
-    console.log("🟠 DA: Соединение с сервером установлено! Отправляю токен...");
+    console.log("🟠 DA: Соединение установлено! Отправляю токен авторизации...");
     socket.emit('add-user', { token: daToken.trim(), type: "minor" });
   });
 
@@ -135,7 +139,7 @@ async function checkDonateX() {
   } catch (e) {}
 }
 
-// Запуск проверок
+// Интервалы
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
