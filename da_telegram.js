@@ -9,7 +9,7 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// Функция создания сокета без жесткой проверки subprotocol
+// Функция создания сокета с правильными браузерными заголовками
 function createWs(url) {
   const headers = {
     "Origin": "https://www.donationalerts.com",
@@ -23,7 +23,7 @@ function createWs(url) {
   }
 }
 
-// Извлечение данных доната
+// Рекурсивный поиск объекта доната в теле сообщения
 function extractDonation(obj) {
   if (!obj) return null;
   if (typeof obj === 'string') {
@@ -53,7 +53,7 @@ function extractDonation(obj) {
   return null;
 }
 
-// Сервер для поддержания активности на Render
+// Веб-сервер для UptimeRobot
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -72,7 +72,7 @@ bot.launch({ dropPendingUpdates: true })
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠) — CENTRIFUGO (JSON)
+// 1. DONATION ALERTS (🟠) — CENTRIFUGO V2 PROTOCOL
 // ==========================================
 let lastDaId = null;
 let daWs = null;
@@ -110,7 +110,7 @@ async function connectDA() {
                   || html.match(/(eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})/);
 
     if (!jwtMatch) {
-      console.error("❌ DA Не удалось извлечь токен Centrifugo со страницы виджета");
+      console.error("❌ DA Не удалось извлечь токен со страницы виджета");
       setTimeout(connectDA, 15000);
       return;
     }
@@ -141,41 +141,46 @@ async function connectDA() {
     daWs = createWs(wsUrl);
 
     const onOpen = () => {
-      console.log("🟠 DA: Сокет открыт! Авторизуюсь...");
+      console.log("🟠 DA: Сокет открыт! Авторизуюсь через метод CONNECT...");
+      // Точный синтаксис Centrifugo v2
       daWs.send(JSON.stringify({
         id: 1,
-        connect: { token: socketToken }
+        method: 0,
+        params: { token: socketToken }
       }));
     };
 
     const onMessage = (event) => {
       const rawText = typeof event.data !== 'undefined' ? event.data.toString() : event.toString();
-      if (rawText === '{}') return;
+      if (!rawText.trim() || rawText === '{}') return;
 
       try {
         const msg = JSON.parse(rawText);
 
-        // 1. Успешный ответ на подключение
+        // 1. Ответ на подключение
         if (msg.id === 1) {
           if (msg.error) {
             console.error("❌ DA Ошибка авторизации:", JSON.stringify(msg.error));
             return;
           }
-          console.log(`🟠 DA: Авторизован! Подписываюсь на ${donationChannel}...`);
+          console.log(`🟠 DA: Авторизован успешно! Подписываюсь на ${donationChannel}...`);
+          // Метод 1 — SUBSCRIBE в Centrifugo v2
           daWs.send(JSON.stringify({
             id: 2,
-            subscribe: { channel: donationChannel }
+            method: 1,
+            params: { channel: donationChannel }
           }));
 
+          // Пинг каждые 25 секунд (метод 7 — PING в Centrifugo v2)
           pingInterval = setInterval(() => {
             if (daWs && (daWs.readyState === 1 || daWs.readyState === WebSocket.OPEN)) {
-              daWs.send(JSON.stringify({}));
+              daWs.send(JSON.stringify({ method: 7, params: {} }));
             }
           }, 25000);
           return;
         }
 
-        // 2. Успешный ответ на подписку
+        // 2. Ответ на подписку
         if (msg.id === 2) {
           if (msg.error) {
             console.error("❌ DA Ошибка подписки:", JSON.stringify(msg.error));
