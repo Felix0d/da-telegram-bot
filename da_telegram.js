@@ -1,4 +1,4 @@
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // Отключаем строгую блокировку SSL для DA
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const telegramToken = process.env.TELEGRAM_TOKEN;
 const daToken = process.env.DA_TOKEN;
@@ -7,42 +7,34 @@ const dxToken = process.env.DX_TOKEN;
 const channel = process.env.TELEGRAM_CHANNEL;
 
 const http = require('http');
-const https = require('https');
 const { Telegraf } = require('telegraf');
 
-// Надежный запрос рукопожатия в обход SSL-блокировок
-function requestHandshake(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {
-      rejectUnauthorized: false,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://www.donationalerts.com"
-      }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, text: data }));
-    });
-    req.on('error', reject);
-    req.setTimeout(10000, () => {
-      req.destroy();
-      reject(new Error("Таймаут подключения к DA"));
-    });
-  });
-}
-
-// Создание экземпляра WebSocket с игнорированием ошибок сертификата
-function createWebSocket(url) {
+// Функция создания WebSocket с поддержкой Node и браузерной среды
+function createWs(url) {
   try {
-    const WsModule = require('ws');
-    return new WsModule(url, { rejectUnauthorized: false });
+    const WsClass = require('ws');
+    return new WsClass(url, { rejectUnauthorized: false });
   } catch (e) {
     return new WebSocket(url);
   }
 }
 
-// Веб-сервер для UptimeRobot
+// Поиск данных доната в произвольной структуре ответа Centrifugo
+function extractDonation(obj) {
+  if (!obj) return null;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj); } catch (e) { return null; }
+  }
+  if (typeof obj !== 'object') return null;
+  if (obj.amount !== undefined || obj.amount_formatted !== undefined || obj.sum !== undefined) {
+    return obj;
+  }
+  if (obj.data) return extractDonation(obj.data);
+  if (obj.result) return extractDonation(obj.result);
+  return null;
+}
+
+// Веб-сервер для поддержания активности на Render
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -61,10 +53,11 @@ bot.launch({ dropPendingUpdates: true })
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠)
+// 1. DONATION ALERTS (🟠) — СОВРЕМЕННЫЙ CENTRIFUGO
 // ==========================================
 let lastDaId = null;
 let daWs = null;
+let pingInterval = null;
 
 async function connectDA() {
   if (!daToken) {
@@ -72,75 +65,132 @@ async function connectDA() {
     return;
   }
 
+  if (pingInterval) clearInterval(pingInterval);
+
   try {
-    console.log("🟠 DA: Шаг 1 — Запрос сессии (рукопожатие)...");
-    const handshakeUrl = `https://socket.donationalerts.ru/socket.io/?EIO=3&transport=polling&t=${Date.now()}`;
+    console.log("🟠 DA: Получаю конфигурацию через страницу виджета...");
+    const widgetUrl = `https://www.donationalerts.com/widget/alerts?token=${daToken.trim()}`;
     
-    const response = await requestHandshake(handshakeUrl);
+    const res = await fetch(widgetUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      }
+    });
 
-    if (response.status !== 200) {
-      console.error(`❌ DA Сервер вернул статус ${response.status}:`, response.text.slice(0, 100));
-      setTimeout(connectDA, 7000);
+    if (!res.ok) {
+      console.error(`❌ DA Виджет вернул ошибку HTTP ${res.status}`);
+      setTimeout(connectDA, 10000);
       return;
     }
 
-    const sidMatch = response.text.match(/"sid":"([^"]+)"/);
-    if (!sidMatch) {
-      console.error("❌ DA Не удалось извлечь sid из ответа:", response.text.slice(0, 100));
-      setTimeout(connectDA, 7000);
+    const html = await res.text();
+
+    // Извлечение JWT токена сокета Centrifugo
+    const jwtMatch = html.match(/["']socket_connection_token["']\s*:\s*["']([^"']+)["']/)
+                  || html.match(/token["']?\s*:\s*["'](eyJ[^"']+)["']/)
+                  || html.match(/(eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})/);
+
+    if (!jwtMatch) {
+      console.error("❌ DA Не удалось извлечь токен Centrifugo со страницы виджета");
+      setTimeout(connectDA, 15000);
       return;
     }
 
-    const sid = sidMatch[1];
-    console.log(`🟠 DA: Сессия получена (${sid}). Шаг 2 — Подключаю сокет...`);
+    const socketToken = jwtMatch[1] || jwtMatch[0];
 
-    const wsUrl = `wss://socket.donationalerts.ru/socket.io/?EIO=3&transport=websocket&sid=${sid}`;
-    daWs = createWebSocket(wsUrl);
+    // Определение User ID для формирования имени канала
+    let userId = null;
+    try {
+      const payloadBase64 = socketToken.split('.')[1];
+      const payloadJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
+      const payload = JSON.parse(payloadJson);
+      userId = payload.sub || payload.client || payload.user_id;
+    } catch (e) {}
+
+    if (!userId) {
+      const userMatch = html.match(/["']user_id["']\s*:\s*(\d+)/) 
+                     || html.match(/user_id\s*=\s*(\d+)/) 
+                     || html.match(/\$alerts:donation_(\d+)/);
+      if (userMatch) userId = userMatch[1];
+    }
+
+    if (!userId) {
+      console.error("❌ DA Не удалось определить ID пользователя");
+      setTimeout(connectDA, 15000);
+      return;
+    }
+
+    const wsUrl = "wss://centrifugo.donationalerts.com/connection/websocket";
+    console.log(`🟠 DA: Подключаюсь к Centrifugo (ID: ${userId})...`);
+
+    daWs = createWs(wsUrl);
 
     const onOpen = () => {
-      console.log("🟠 DA: Сокет открыт. Отправляю проверку связи (2probe)...");
-      daWs.send("2probe");
+      console.log("🟠 DA: Сокет открыт! Отправляю токен Centrifugo...");
+      daWs.send(JSON.stringify({
+        params: { token: socketToken },
+        id: 1
+      }));
+
+      // Пинг каждые 25 секунд для удержания соединения
+      pingInterval = setInterval(() => {
+        if (daWs && (daWs.readyState === 1 || daWs.readyState === WebSocket.OPEN)) {
+          daWs.send(JSON.stringify({}));
+        }
+      }, 25000);
     };
 
     const onMessage = (event) => {
-      const msg = typeof event.data !== 'undefined' ? event.data.toString() : event.toString();
+      const rawText = typeof event.data !== 'undefined' ? event.data.toString() : event.toString();
+      if (rawText === '{}') return; // Ответ на пинг
 
-      if (msg === "3probe") {
-        console.log("🟠 DA: Соединение подтверждено! Авторизую токен...");
-        daWs.send("5");
-        daWs.send(`42["add-user",{"token":"${daToken.trim()}","type":"minor"}]`);
-        console.log("🟠 DonationAlerts: ПОДКЛЮЧЕН И ГОТОВ К РАБОТЕ!");
-        return;
-      }
+      try {
+        const msg = JSON.parse(rawText);
 
-      if (msg === "2") {
-        daWs.send("3");
-        return;
-      }
-
-      if (msg.startsWith("42")) {
-        try {
-          const payload = JSON.parse(msg.slice(2));
-          if (payload[0] === "donation") {
-            let d = payload[1];
-            if (typeof d === "string") d = JSON.parse(d);
-
-            console.log("🟠 DA получено событие:", d.id || "без ID");
-            if (d.id && d.id === lastDaId) return;
-            if (d.id) lastDaId = d.id;
-
-            const name = d.username || d.name || "Аноним";
-            const sum = d.amount_formatted || d.amount || "0";
-            const cur = d.currency || "RUB";
-            const comment = d.message || d.comment || "";
-
-            bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${name}: ${sum} ${cur}\n"${comment}"`)
-              .then(() => console.log("🟠 DA: Уведомление доставлено в Telegram"))
-              .catch((err) => console.error("❌ DA Ошибка отправки в TG:", err.message));
+        // 1. Успешная авторизация в Centrifugo
+        if (msg.id === 1) {
+          if (msg.error) {
+            console.error("❌ DA Ошибка авторизации в Centrifugo:", msg.error);
+            return;
           }
-        } catch (e) {
-          console.error("❌ DA Ошибка обработки:", e.message);
+          console.log(`🟠 DA: Авторизован! Подписываюсь на канал $alerts:donation_${userId}...`);
+          daWs.send(JSON.stringify({
+            params: { channel: `$alerts:donation_${userId}` },
+            id: 2
+          }));
+          return;
         }
+
+        // 2. Успешная подписка на донаты
+        if (msg.id === 2) {
+          if (msg.error) {
+            console.error("❌ DA Ошибка подписки на канал:", msg.error);
+            return;
+          }
+          console.log("🟠 DonationAlerts: ПОДКЛЮЧЕН И СЛУШАЕТ ДОНАТЫ!");
+          return;
+        }
+
+        // 3. Обработка входящего доната
+        const donation = extractDonation(msg);
+        if (donation && (donation.amount || donation.amount_formatted || donation.sum)) {
+          console.log("🟠 DA получено событие:", donation.id || "без ID");
+
+          if (donation.id && donation.id === lastDaId) return;
+          if (donation.id) lastDaId = donation.id;
+
+          const name = donation.username || donation.name || donation.billing_name || "Аноним";
+          const sum = donation.amount_formatted || donation.amount || donation.sum || "0";
+          const cur = donation.currency || "RUB";
+          const comment = donation.message || donation.comment || "";
+
+          bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${name}: ${sum} ${cur}\n"${comment}"`)
+            .then(() => console.log("🟠 DA: Уведомление доставлено в Telegram"))
+            .catch((err) => console.error("❌ DA Ошибка отправки в TG:", err.message));
+        }
+      } catch (e) {
+        console.error("❌ DA Ошибка обработки пакета:", e.message);
       }
     };
 
@@ -149,8 +199,9 @@ async function connectDA() {
     };
 
     const onClose = () => {
-      console.log("⚠️ DA Сокет закрылся. Переподключение через 5 сек...");
-      setTimeout(connectDA, 5000);
+      if (pingInterval) clearInterval(pingInterval);
+      console.log("⚠️ DA Соединение закрыто. Переподключение через 7 сек...");
+      setTimeout(connectDA, 7000);
     };
 
     if (typeof daWs.on === 'function') {
@@ -166,8 +217,9 @@ async function connectDA() {
     }
 
   } catch (e) {
-    console.error("❌ DA Исключение при подключении:", e.message);
-    setTimeout(connectDA, 7000);
+    if (pingInterval) clearInterval(pingInterval);
+    console.error("❌ DA Сбой при установке соединения:", e.message);
+    setTimeout(connectDA, 10000);
   }
 }
 
@@ -232,6 +284,7 @@ async function checkDonateX() {
   } catch (e) {}
 }
 
+// Запуск проверок DonatePay и DonateX
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
