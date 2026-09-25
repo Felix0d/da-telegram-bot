@@ -1,3 +1,5 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // Отключаем строгую блокировку SSL для DA
+
 const telegramToken = process.env.TELEGRAM_TOKEN;
 const daToken = process.env.DA_TOKEN;
 const dpToken = process.env.DP_TOKEN;
@@ -5,10 +7,42 @@ const dxToken = process.env.DX_TOKEN;
 const channel = process.env.TELEGRAM_CHANNEL;
 
 const http = require('http');
+const https = require('https');
 const { Telegraf } = require('telegraf');
-const WebSocket = globalThis.WebSocket || require('ws');
 
-// Сервер для поддержания активности на Render
+// Надежный запрос рукопожатия в обход SSL-блокировок
+function requestHandshake(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      rejectUnauthorized: false,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://www.donationalerts.com"
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve({ status: res.statusCode, text: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error("Таймаут подключения к DA"));
+    });
+  });
+}
+
+// Создание экземпляра WebSocket с игнорированием ошибок сертификата
+function createWebSocket(url) {
+  try {
+    const WsModule = require('ws');
+    return new WsModule(url, { rejectUnauthorized: false });
+  } catch (e) {
+    return new WebSocket(url);
+  }
+}
+
+// Веб-сервер для UptimeRobot
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -20,12 +54,14 @@ bot.start((ctx) => {
   ctx.reply(`🦇 Бот на связи!\nТвой Chat ID: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
 });
 
+bot.catch((err) => console.error("❌ Ошибка Telegraf:", err.message));
+
 bot.launch({ dropPendingUpdates: true })
   .then(() => console.log("🚀 Системы Telegram запущены!"))
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠) — ДВУХШАГОВАЯ АВТОРИЗАЦИЯ
+// 1. DONATION ALERTS (🟠)
 // ==========================================
 let lastDaId = null;
 let daWs = null;
@@ -40,41 +76,33 @@ async function connectDA() {
     console.log("🟠 DA: Шаг 1 — Запрос сессии (рукопожатие)...");
     const handshakeUrl = `https://socket.donationalerts.ru/socket.io/?EIO=3&transport=polling&t=${Date.now()}`;
     
-    const res = await fetch(handshakeUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://www.donationalerts.com"
-      }
-    });
+    const response = await requestHandshake(handshakeUrl);
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error(`❌ DA Сервер вернул код ${res.status}:`, errText.slice(0, 120));
+    if (response.status !== 200) {
+      console.error(`❌ DA Сервер вернул статус ${response.status}:`, response.text.slice(0, 100));
       setTimeout(connectDA, 7000);
       return;
     }
 
-    const text = await res.text();
-    const sidMatch = text.match(/"sid":"([^"]+)"/);
-
+    const sidMatch = response.text.match(/"sid":"([^"]+)"/);
     if (!sidMatch) {
-      console.error("❌ DA Не удалось извлечь sid из ответа:", text.slice(0, 100));
+      console.error("❌ DA Не удалось извлечь sid из ответа:", response.text.slice(0, 100));
       setTimeout(connectDA, 7000);
       return;
     }
 
     const sid = sidMatch[1];
-    console.log(`🟠 DA: Сессия получена (${sid}). Шаг 2 — Подключаю WebSocket...`);
+    console.log(`🟠 DA: Сессия получена (${sid}). Шаг 2 — Подключаю сокет...`);
 
     const wsUrl = `wss://socket.donationalerts.ru/socket.io/?EIO=3&transport=websocket&sid=${sid}`;
-    daWs = new WebSocket(wsUrl);
+    daWs = createWebSocket(wsUrl);
 
-    daWs.onopen = () => {
-      console.log("🟠 DA: WebSocket открыт. Отправляю проверку соединения (2probe)...");
+    const onOpen = () => {
+      console.log("🟠 DA: Сокет открыт. Отправляю проверку связи (2probe)...");
       daWs.send("2probe");
     };
 
-    daWs.onmessage = (event) => {
+    const onMessage = (event) => {
       const msg = typeof event.data !== 'undefined' ? event.data.toString() : event.toString();
 
       if (msg === "3probe") {
@@ -116,14 +144,26 @@ async function connectDA() {
       }
     };
 
-    daWs.onerror = (err) => {
+    const onError = (err) => {
       console.error("❌ DA Ошибка сокета:", err.message || err);
     };
 
-    daWs.onclose = () => {
+    const onClose = () => {
       console.log("⚠️ DA Сокет закрылся. Переподключение через 5 сек...");
       setTimeout(connectDA, 5000);
     };
+
+    if (typeof daWs.on === 'function') {
+      daWs.on('open', onOpen);
+      daWs.on('message', onMessage);
+      daWs.on('error', onError);
+      daWs.on('close', onClose);
+    } else {
+      daWs.onopen = onOpen;
+      daWs.onmessage = onMessage;
+      daWs.onerror = onError;
+      daWs.onclose = onClose;
+    }
 
   } catch (e) {
     console.error("❌ DA Исключение при подключении:", e.message);
