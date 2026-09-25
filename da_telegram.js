@@ -9,7 +9,7 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// Функция создания сокета с правильными браузерными заголовками
+// Функция создания сокета с протоколом centrifuge-json
 function createWs(url) {
   const headers = {
     "Origin": "https://www.donationalerts.com",
@@ -17,13 +17,13 @@ function createWs(url) {
   };
   try {
     const WsClass = require('ws');
-    return new WsClass(url, { headers, rejectUnauthorized: false });
+    return new WsClass(url, ['centrifuge-json'], { headers, rejectUnauthorized: false });
   } catch (e) {
-    return new WebSocket(url);
+    return new WebSocket(url, ['centrifuge-json']);
   }
 }
 
-// Рекурсивный поиск объекта доната в любых структурах ответа
+// Поиск данных доната в структуре Centrifugo
 function extractDonation(obj) {
   if (!obj) return null;
   if (typeof obj === 'string') {
@@ -72,7 +72,7 @@ bot.launch({ dropPendingUpdates: true })
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠) — CENTRIFUGO
+// 1. DONATION ALERTS (🟠) — CENTRIFUGO (JSON)
 // ==========================================
 let lastDaId = null;
 let daWs = null;
@@ -132,18 +132,17 @@ async function connectDA() {
       if (userMatch) userId = userMatch[1];
     }
 
-    // Извлечение точного имени канала из скриптов страницы
     const channelMatch = html.match(/["'](\$alerts:donation_\d+)["']/) || html.match(/["'](alerts:donation_\d+)["']/);
     const donationChannel = channelMatch ? channelMatch[1] : `$alerts:donation_${userId}`;
 
-    const wsUrl = "wss://centrifugo.donationalerts.com/connection/websocket";
-    console.log(`🟠 DA: Подключаюсь к Centrifugo (Канал: ${donationChannel})...`);
+    // Передаем ?format=json для текстового протокола
+    const wsUrl = "wss://centrifugo.donationalerts.com/connection/websocket?format=json";
+    console.log(`🟠 DA: Подключаюсь к Centrifugo JSON (Канал: ${donationChannel})...`);
 
     daWs = createWs(wsUrl);
 
     const onOpen = () => {
-      console.log("🟠 DA: Сокет открыт! Отправляю команду connect...");
-      // Корректный протокол Centrifugo v2/v3
+      console.log("🟠 DA: Сокет открыт! Авторизуюсь...");
       daWs.send(JSON.stringify({
         id: 1,
         connect: { token: socketToken }
@@ -157,10 +156,10 @@ async function connectDA() {
       try {
         const msg = JSON.parse(rawText);
 
-        // 1. Успешный ответ на авторизацию
+        // 1. Успешный ответ на подключение
         if (msg.id === 1) {
           if (msg.error) {
-            console.error("❌ DA Ошибка авторизации в Centrifugo:", JSON.stringify(msg.error));
+            console.error("❌ DA Ошибка авторизации:", JSON.stringify(msg.error));
             return;
           }
           console.log(`🟠 DA: Авторизован! Подписываюсь на ${donationChannel}...`);
@@ -169,7 +168,6 @@ async function connectDA() {
             subscribe: { channel: donationChannel }
           }));
 
-          // Запуск пинга только после подтверждения авторизации
           pingInterval = setInterval(() => {
             if (daWs && (daWs.readyState === 1 || daWs.readyState === WebSocket.OPEN)) {
               daWs.send(JSON.stringify({}));
@@ -188,7 +186,7 @@ async function connectDA() {
           return;
         }
 
-        // 3. Получение события доната
+        // 3. Обработка входящего доната
         const donation = extractDonation(msg);
         if (donation && (donation.amount !== undefined || donation.amount_formatted !== undefined || donation.sum !== undefined)) {
           console.log("🟠 DA получено событие:", donation.id || "без ID");
