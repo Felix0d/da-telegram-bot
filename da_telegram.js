@@ -15,34 +15,46 @@ http.createServer((req, res) => {
 
 const bot = new Telegraf(telegramToken);
 
-// Обработчик команды /start
+// Команда /start для проверки связи
 bot.start((ctx) => {
   console.log(`Получена команда /start от @${ctx.from.username || 'user'} (ID: ${ctx.chat.id})`);
   ctx.reply(`🦇 Я на связи! Все системы работают.\n\nТвой Chat ID: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.launch({ dropPendingUpdates: true })
-  .then(() => console.log("🚀 Системы запущены!"))
+  .then(() => console.log("🚀 Системы Telegram запущены!"))
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
 // 1. DONATION ALERTS (🟠)
 // ==========================================
 let lastDaId = null;
-if (daToken) {
-  const socket = require('socket.io-client')
-    .connect("wss://socket.donationalerts.ru:443", { 
-      transports: ["websocket"], 
-      reconnection: true 
-    });
 
-  socket.emit('add-user', { token: daToken.trim(), type: "minor" });
-  console.log("🟠 DonationAlerts: OK");
+if (daToken) {
+  const socket = require('socket.io-client')("wss://socket.donationalerts.ru:443", { 
+    transports: ["websocket"], 
+    reconnection: true,
+    reconnectionDelay: 5000
+  });
+
+  // Авторизуемся ТОЛЬКО после реального рукопожатия с сервером
+  socket.on('connect', () => {
+    console.log("🟠 DA: Соединение с сервером установлено! Отправляю токен...");
+    socket.emit('add-user', { token: daToken.trim(), type: "minor" });
+  });
+
+  socket.on('connect_error', (err) => {
+    console.error("❌ DA Ошибка подключения сокета:", err.message);
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log("⚠️ DA Сокет отключился:", reason);
+  });
 
   socket.on('donation', function(msg) {
     try {
       let event = typeof msg === 'string' ? JSON.parse(msg) : msg;
-      console.log("🟠 DA получено событие:", event.id || 'ID отсутствует');
+      console.log("🟠 DA получено событие:", event.id || 'без ID');
 
       if (event.id && event.id === lastDaId) return;
       if (event.id) lastDaId = event.id;
@@ -94,10 +106,7 @@ async function checkDonatePay() {
 // ==========================================
 let lastDxId = null;
 async function checkDonateX() {
-  if (!dxToken) { 
-    if (lastDxId === null) console.log("🟢 DonateX: ПРОПУЩЕН (Нет токена)"); 
-    return; 
-  }
+  if (!dxToken) return;
 
   try {
     const response = await fetch(`https://donatex.gg/api/v1/donations?token=${dxToken.trim()}&limit=5`, {
@@ -105,11 +114,7 @@ async function checkDonateX() {
     });
 
     const text = await response.text();
-
-    if (text.trim().startsWith('<')) {
-      if (lastDxId === null) console.log("🟢 DonateX: Ошибка — Сервер не принял токен (вернул страницу)");
-      return;
-    }
+    if (text.trim().startsWith('<')) return;
 
     const data = JSON.parse(text);
     const donations = data.donations || data.data;
@@ -127,12 +132,10 @@ async function checkDonateX() {
         lastDxId = d.id;
       }
     }
-  } catch (e) {
-    if (lastDxId === null) console.log("🟢 DonateX: Ошибка сети или API");
-  }
+  } catch (e) {}
 }
 
-// Первоначальный опрос и интервалы
+// Запуск проверок
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
