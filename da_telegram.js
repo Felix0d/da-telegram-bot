@@ -7,7 +7,7 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// Веб-сервер для поддержания активности
+// Веб-сервер для поддержания активности на Render
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -22,20 +22,41 @@ bot.launch({ dropPendingUpdates: true })
 // ==========================================
 // 1. DONATION ALERTS (🟠)
 // ==========================================
-let daEventId = null;
+let lastDaId = null;
 if (daToken) {
-    const socket = require('socket.io-client')
-      .connect("wss://socket.donationalerts.ru:443", { transports: ["websocket"], reconnection: true });
-    socket.emit('add-user', { token: daToken, type: "minor" });
-    console.log("🟠 DonationAlerts: OK");
-    socket.on('donation', function(msg){
-      let event = JSON.parse(msg);
-      if (event.alert_type === '1' || event.alert_type === 1) {
-        if (daEventId === event.id) return;
-        daEventId = event.id;
-        bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${event.username}: ${event.amount_formatted} ${event.currency}\n"${event.message || ''}"`);
-      }
+  const socket = require('socket.io-client')
+    .connect("wss://socket.donationalerts.ru:443", { 
+      transports: ["websocket"], 
+      reconnection: true 
     });
+
+  socket.emit('add-user', { token: daToken.trim(), type: "minor" });
+  console.log("🟠 DonationAlerts: OK");
+
+  socket.on('donation', function(msg) {
+    try {
+      let event = typeof msg === 'string' ? JSON.parse(msg) : msg;
+      console.log("🟠 DA получено событие:", event.id || 'ID отсутствует');
+
+      // Проверка на дубликаты
+      if (event.id && event.id === lastDaId) return;
+      if (event.id) lastDaId = event.id;
+
+      const name = event.username || event.name || 'Аноним';
+      const sum = event.amount_formatted || event.amount || '0';
+      const cur = event.currency || 'RUB';
+      const comment = event.message || event.comment || '';
+
+      bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${name}: ${sum} ${cur}\n"${comment}"`)
+        .then(() => console.log("🟠 DA: Уведомление доставлено в Telegram"))
+        .catch((err) => console.error("❌ DA Ошибка отправки в TG:", err.message));
+
+    } catch (e) {
+      console.error("❌ DA Ошибка обработки:", e.message);
+    }
+  });
+} else {
+  console.log("🟠 DonationAlerts: ПРОПУЩЕН (Нет токена)");
 }
 
 // ==========================================
@@ -45,64 +66,68 @@ let lastDpId = null;
 async function checkDonatePay() {
   if (!dpToken) return;
   try {
-    const response = await fetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken}&limit=5`);
+    const response = await fetch(`https://donatepay.eu/api/v1/transactions?access_token=${dpToken.trim()}&limit=5`);
     const data = await response.json();
-    if (data && data.status === 'success') {
+    if (data && data.status === 'success' && Array.isArray(data.data)) {
       if (lastDpId === null) {
         lastDpId = data.data.length > 0 ? data.data[0].id : 0;
         console.log("🔵 DonatePay: OK");
         return;
       }
-      data.data.filter(d => d.id > lastDpId).reverse().forEach(d => {
-        bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`);
+      const newDons = data.data.filter(d => d.id > lastDpId).reverse();
+      for (let d of newDons) {
+        await bot.telegram.sendMessage(channel, `🔵 [DonatePay]\n${d.what || 'Аноним'}: ${d.sum} ${d.currency}\n"${d.comment || ''}"`)
+          .catch((err) => console.error("❌ DP Ошибка отправки в TG:", err.message));
         lastDpId = d.id;
-      });
+      }
     }
   } catch (e) {}
 }
 
 // ==========================================
-// 3. DONATE X (🟢) - Тот самый проблемный узел
+// 3. DONATE X (🟢)
 // ==========================================
 let lastDxId = null;
 async function checkDonateX() {
   if (!dxToken) { 
-      if (lastDxId === null) console.log("🟢 DonateX: ПРОПУЩЕН (Нет токена)"); 
-      return; 
+    if (lastDxId === null) console.log("🟢 DonateX: ПРОПУЩЕН (Нет токена)"); 
+    return; 
   }
-  
+
   try {
-    // Используем максимально простой метод запроса
     const response = await fetch(`https://donatex.gg/api/v1/donations?token=${dxToken.trim()}&limit=5`, {
-        headers: { 'Accept': 'application/json' }
+      headers: { 'Accept': 'application/json' }
     });
-    
+
     const text = await response.text();
-    
-    // Если всё еще шлет HTML (текст начинается с <), значит токен неверный или не активен
+
     if (text.trim().startsWith('<')) {
-        if (lastDxId === null) console.log("🟢 DonateX: Ошибка — Сервер не принял токен (вернул страницу)");
-        return;
+      if (lastDxId === null) console.log("🟢 DonateX: Ошибка — Сервер не принял токен (вернул страницу)");
+      return;
     }
 
     const data = JSON.parse(text);
-    if (data && Array.isArray(data.donations)) {
+    const donations = data.donations || data.data;
+
+    if (data && Array.isArray(donations)) {
       if (lastDxId === null) {
-        lastDxId = data.donations.length > 0 ? data.donations[0].id : 0;
+        lastDxId = donations.length > 0 ? donations[0].id : 0;
         console.log("🟢 DonateX: OK");
         return;
       }
-      data.donations.filter(d => d.id > lastDxId).reverse().forEach(d => {
-        bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || 'Аноним'}: ${d.amount} ${d.currency}\n"${d.comment || ''}"`);
+      const newDons = donations.filter(d => d.id > lastDxId).reverse();
+      for (let d of newDons) {
+        await bot.telegram.sendMessage(channel, `🟢 [DonateX]\n${d.nickname || d.username || 'Аноним'}: ${d.amount || d.sum} ${d.currency}\n"${d.comment || ''}"`)
+          .catch((err) => console.error("❌ DX Ошибка отправки в TG:", err.message));
         lastDxId = d.id;
-      });
+      }
     }
   } catch (e) {
-    if (lastDxId === null) console.log(`🟢 DonateX: Ошибка сети или API`);
+    if (lastDxId === null) console.log("🟢 DonateX: Ошибка сети или API");
   }
 }
 
-// Цикл
+// Первоначальный опрос и интервалы (раз в 20 секунд)
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
