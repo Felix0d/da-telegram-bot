@@ -8,7 +8,7 @@ const http = require('http');
 const { Telegraf } = require('telegraf');
 const WebSocket = globalThis.WebSocket || require('ws');
 
-// Сервер для UptimeRobot
+// Сервер для поддержания активности на Render
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -25,96 +25,109 @@ bot.launch({ dropPendingUpdates: true })
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
 
 // ==========================================
-// 1. DONATION ALERTS (🟠) — НАПРЯМУЮ ЧЕРЕЗ EIO=3
+// 1. DONATION ALERTS (🟠) — ДВУХШАГОВАЯ АВТОРИЗАЦИЯ
 // ==========================================
 let lastDaId = null;
 let daWs = null;
 
-function connectDA() {
+async function connectDA() {
   if (!daToken) {
     console.log("🟠 DonationAlerts: ПРОПУЩЕН (Нет токена)");
     return;
   }
 
-  console.log("🟠 DA: Подключение к сокету (EIO=3)...");
-  
   try {
-    daWs = new WebSocket("wss://socket.donationalerts.ru/socket.io/?EIO=3&transport=websocket");
-  } catch (e) {
-    console.error("❌ DA Ошибка запуска сокета:", e.message);
-    setTimeout(connectDA, 5000);
-    return;
-  }
-
-  const handleOpen = () => {
-    console.log("🟠 DA: Канал WebSocket открыт, жду рукопожатия сервера...");
-  };
-
-  const handleMessage = (raw) => {
-    const msg = typeof raw.data !== 'undefined' ? raw.data.toString() : raw.toString();
-
-    // 0 — Пакет рукопожатия от сервера Engine.IO
-    if (msg.startsWith('0')) {
-      console.log("🟠 DA: Рукопожатие подтверждено! Авторизую токен...");
-      const authPayload = `42["add-user",{"token":"${daToken.trim()}","type":"minor"}]`;
-      daWs.send(authPayload);
-      console.log("🟠 DonationAlerts: ПОДКЛЮЧЕН И АВТОРИЗОВАН!");
-      return;
-    }
-
-    // 2 — Пинг от сервера, отправляем 3 (понг)
-    if (msg === '2') {
-      daWs.send('3');
-      return;
-    }
-
-    // 42 — Сообщение с событием (донат)
-    if (msg.startsWith('42')) {
-      try {
-        const payload = JSON.parse(msg.slice(2));
-        if (payload[0] === 'donation') {
-          let event = payload[1];
-          if (typeof event === 'string') event = JSON.parse(event);
-
-          console.log("🟠 DA получено событие:", event.id || 'без ID');
-
-          if (event.id && event.id === lastDaId) return;
-          if (event.id) lastDaId = event.id;
-
-          const name = event.username || event.name || 'Аноним';
-          const sum = event.amount_formatted || event.amount || '0';
-          const cur = event.currency || 'RUB';
-          const comment = event.message || event.comment || '';
-
-          bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${name}: ${sum} ${cur}\n"${comment}"`)
-            .then(() => console.log("🟠 DA: Уведомление доставлено в Telegram"))
-            .catch((err) => console.error("❌ DA Ошибка отправки в TG:", err.message));
-        }
-      } catch (e) {
-        console.error("❌ DA Ошибка парсинга сообщения:", e.message);
+    console.log("🟠 DA: Шаг 1 — Запрос сессии (рукопожатие)...");
+    const handshakeUrl = `https://socket.donationalerts.ru/socket.io/?EIO=3&transport=polling&t=${Date.now()}`;
+    
+    const res = await fetch(handshakeUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://www.donationalerts.com"
       }
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`❌ DA Сервер вернул код ${res.status}:`, errText.slice(0, 120));
+      setTimeout(connectDA, 7000);
+      return;
     }
-  };
 
-  const handleError = (err) => {
-    console.error("❌ DA Ошибка соединения:", err.message || err);
-  };
+    const text = await res.text();
+    const sidMatch = text.match(/"sid":"([^"]+)"/);
 
-  const handleClose = () => {
-    console.log("⚠️ DA Сокет закрылся. Переподключение через 5 сек...");
-    setTimeout(connectDA, 5000);
-  };
+    if (!sidMatch) {
+      console.error("❌ DA Не удалось извлечь sid из ответа:", text.slice(0, 100));
+      setTimeout(connectDA, 7000);
+      return;
+    }
 
-  if (typeof daWs.on === 'function') {
-    daWs.on('open', handleOpen);
-    daWs.on('message', handleMessage);
-    daWs.on('error', handleError);
-    daWs.on('close', handleClose);
-  } else {
-    daWs.onopen = handleOpen;
-    daWs.onmessage = handleMessage;
-    daWs.onerror = handleError;
-    daWs.onclose = handleClose;
+    const sid = sidMatch[1];
+    console.log(`🟠 DA: Сессия получена (${sid}). Шаг 2 — Подключаю WebSocket...`);
+
+    const wsUrl = `wss://socket.donationalerts.ru/socket.io/?EIO=3&transport=websocket&sid=${sid}`;
+    daWs = new WebSocket(wsUrl);
+
+    daWs.onopen = () => {
+      console.log("🟠 DA: WebSocket открыт. Отправляю проверку соединения (2probe)...");
+      daWs.send("2probe");
+    };
+
+    daWs.onmessage = (event) => {
+      const msg = typeof event.data !== 'undefined' ? event.data.toString() : event.toString();
+
+      if (msg === "3probe") {
+        console.log("🟠 DA: Соединение подтверждено! Авторизую токен...");
+        daWs.send("5");
+        daWs.send(`42["add-user",{"token":"${daToken.trim()}","type":"minor"}]`);
+        console.log("🟠 DonationAlerts: ПОДКЛЮЧЕН И ГОТОВ К РАБОТЕ!");
+        return;
+      }
+
+      if (msg === "2") {
+        daWs.send("3");
+        return;
+      }
+
+      if (msg.startsWith("42")) {
+        try {
+          const payload = JSON.parse(msg.slice(2));
+          if (payload[0] === "donation") {
+            let d = payload[1];
+            if (typeof d === "string") d = JSON.parse(d);
+
+            console.log("🟠 DA получено событие:", d.id || "без ID");
+            if (d.id && d.id === lastDaId) return;
+            if (d.id) lastDaId = d.id;
+
+            const name = d.username || d.name || "Аноним";
+            const sum = d.amount_formatted || d.amount || "0";
+            const cur = d.currency || "RUB";
+            const comment = d.message || d.comment || "";
+
+            bot.telegram.sendMessage(channel, `🟠 [DonationAlerts]\n${name}: ${sum} ${cur}\n"${comment}"`)
+              .then(() => console.log("🟠 DA: Уведомление доставлено в Telegram"))
+              .catch((err) => console.error("❌ DA Ошибка отправки в TG:", err.message));
+          }
+        } catch (e) {
+          console.error("❌ DA Ошибка обработки:", e.message);
+        }
+      }
+    };
+
+    daWs.onerror = (err) => {
+      console.error("❌ DA Ошибка сокета:", err.message || err);
+    };
+
+    daWs.onclose = () => {
+      console.log("⚠️ DA Сокет закрылся. Переподключение через 5 сек...");
+      setTimeout(connectDA, 5000);
+    };
+
+  } catch (e) {
+    console.error("❌ DA Исключение при подключении:", e.message);
+    setTimeout(connectDA, 7000);
   }
 }
 
@@ -179,7 +192,6 @@ async function checkDonateX() {
   } catch (e) {}
 }
 
-// Интервалы проверок
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
