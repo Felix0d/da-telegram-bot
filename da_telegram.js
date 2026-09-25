@@ -9,7 +9,7 @@ const channel = process.env.TELEGRAM_CHANNEL;
 const http = require('http');
 const { Telegraf } = require('telegraf');
 
-// Функция создания сокета с протоколом centrifuge-json
+// Функция создания сокета без жесткой проверки subprotocol
 function createWs(url) {
   const headers = {
     "Origin": "https://www.donationalerts.com",
@@ -17,13 +17,13 @@ function createWs(url) {
   };
   try {
     const WsClass = require('ws');
-    return new WsClass(url, ['centrifuge-json'], { headers, rejectUnauthorized: false });
+    return new WsClass(url, { headers, rejectUnauthorized: false });
   } catch (e) {
-    return new WebSocket(url, ['centrifuge-json']);
+    return new WebSocket(url);
   }
 }
 
-// Поиск данных доната в структуре Centrifugo
+// Извлечение данных доната
 function extractDonation(obj) {
   if (!obj) return null;
   if (typeof obj === 'string') {
@@ -53,7 +53,7 @@ function extractDonation(obj) {
   return null;
 }
 
-// Веб-сервер для удержания активности Render
+// Сервер для поддержания активности на Render
 http.createServer((req, res) => {
   res.write("Vampire Bot is awake!");
   res.end();
@@ -135,7 +135,6 @@ async function connectDA() {
     const channelMatch = html.match(/["'](\$alerts:donation_\d+)["']/) || html.match(/["'](alerts:donation_\d+)["']/);
     const donationChannel = channelMatch ? channelMatch[1] : `$alerts:donation_${userId}`;
 
-    // Передаем ?format=json для текстового протокола
     const wsUrl = "wss://centrifugo.donationalerts.com/connection/websocket?format=json";
     console.log(`🟠 DA: Подключаюсь к Centrifugo JSON (Канал: ${donationChannel})...`);
 
