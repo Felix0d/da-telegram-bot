@@ -15,6 +15,12 @@ http.createServer((req, res) => {
 
 const bot = new Telegraf(telegramToken);
 
+// Обработчик команды /start
+bot.start((ctx) => {
+  console.log(`Получена команда /start от @${ctx.from.username || 'user'} (ID: ${ctx.chat.id})`);
+  ctx.reply(`🦇 Я на связи! Все системы работают.\n\nТвой Chat ID: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
+});
+
 bot.launch({ dropPendingUpdates: true })
   .then(() => console.log("🚀 Системы запущены!"))
   .catch((err) => console.error("❌ Ошибка Telegram:", err.message));
@@ -38,7 +44,6 @@ if (daToken) {
       let event = typeof msg === 'string' ? JSON.parse(msg) : msg;
       console.log("🟠 DA получено событие:", event.id || 'ID отсутствует');
 
-      // Проверка на дубликаты
       if (event.id && event.id === lastDaId) return;
       if (event.id) lastDaId = event.id;
 
@@ -127,7 +132,7 @@ async function checkDonateX() {
   }
 }
 
-// Первоначальный опрос и интервалы (раз в 20 секунд)
+// Первоначальный опрос и интервалы
 checkDonatePay();
 checkDonateX();
 setInterval(checkDonatePay, 20000);
